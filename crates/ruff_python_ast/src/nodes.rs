@@ -13,12 +13,13 @@ use itertools::Itertools;
 
 use ruff_text_size::{Ranged, TextLen, TextRange, TextSize};
 
-use crate::name::Name;
 use crate::{
     int,
-    str::Quote,
+    name::Name,
+    str::{Quote, TripleQuotes},
     str_prefix::{AnyStringPrefix, ByteStringPrefix, FStringPrefix, StringLiteralPrefix},
-    ExceptHandler, Expr, FStringElement, LiteralExpressionRef, Pattern, Stmt, TypeParam,
+    ExceptHandler, Expr, ExprRef, FStringElement, LiteralExpressionRef, OperatorPrecedence,
+    Pattern, Stmt, TypeParam,
 };
 
 /// See also [Module](https://docs.python.org/3/library/ast.html#ast.Module)
@@ -364,6 +365,17 @@ impl Expr {
             Expr::EllipsisLiteral(expr) => Some(LiteralExpressionRef::EllipsisLiteral(expr)),
             _ => None,
         }
+    }
+
+    /// Return the [`OperatorPrecedence`] of this expression
+    pub fn precedence(&self) -> OperatorPrecedence {
+        OperatorPrecedence::from(self)
+    }
+}
+
+impl ExprRef<'_> {
+    pub fn precedence(&self) -> OperatorPrecedence {
+        OperatorPrecedence::from(self)
     }
 }
 
@@ -981,25 +993,24 @@ pub trait StringFlags: Copy {
     /// Does the string use single or double quotes in its opener and closer?
     fn quote_style(self) -> Quote;
 
-    /// Is the string triple-quoted, i.e.,
-    /// does it begin and end with three consecutive quote characters?
-    fn is_triple_quoted(self) -> bool;
+    fn triple_quotes(self) -> TripleQuotes;
 
     fn prefix(self) -> AnyStringPrefix;
+
+    /// Is the string triple-quoted, i.e.,
+    /// does it begin and end with three consecutive quote characters?
+    fn is_triple_quoted(self) -> bool {
+        self.triple_quotes().is_yes()
+    }
 
     /// A `str` representation of the quotes used to start and close.
     /// This does not include any prefixes the string has in its opener.
     fn quote_str(self) -> &'static str {
-        if self.is_triple_quoted() {
-            match self.quote_style() {
-                Quote::Single => "'''",
-                Quote::Double => r#"""""#,
-            }
-        } else {
-            match self.quote_style() {
-                Quote::Single => "'",
-                Quote::Double => "\"",
-            }
+        match (self.triple_quotes(), self.quote_style()) {
+            (TripleQuotes::Yes, Quote::Single) => "'''",
+            (TripleQuotes::Yes, Quote::Double) => r#"""""#,
+            (TripleQuotes::No, Quote::Single) => "'",
+            (TripleQuotes::No, Quote::Double) => "\"",
         }
     }
 
@@ -1028,10 +1039,32 @@ pub trait StringFlags: Copy {
         self.quote_len()
     }
 
-    fn format_string_contents(self, contents: &str) -> String {
-        let prefix = self.prefix();
-        let quote_str = self.quote_str();
-        format!("{prefix}{quote_str}{contents}{quote_str}")
+    fn as_any_string_flags(self) -> AnyStringFlags {
+        AnyStringFlags::new(self.prefix(), self.quote_style(), self.triple_quotes())
+    }
+
+    fn display_contents(self, contents: &str) -> DisplayFlags {
+        DisplayFlags {
+            flags: self.as_any_string_flags(),
+            contents,
+        }
+    }
+}
+
+pub struct DisplayFlags<'a> {
+    flags: AnyStringFlags,
+    contents: &'a str,
+}
+
+impl std::fmt::Display for DisplayFlags<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{prefix}{quote}{contents}{quote}",
+            prefix = self.flags.prefix(),
+            quote = self.flags.quote_str(),
+            contents = self.contents
+        )
     }
 }
 
@@ -1063,10 +1096,32 @@ bitflags! {
 
 /// Flags that can be queried to obtain information
 /// regarding the prefixes and quotes used for an f-string.
-#[derive(Default, Copy, Clone, Eq, PartialEq, Hash)]
+///
+/// ## Notes on usage
+///
+/// If you're using a `Generator` from the `ruff_python_codegen` crate to generate a lint-rule fix
+/// from an existing f-string literal, consider passing along the [`FString::flags`] field. If you
+/// don't have an existing literal but have a `Checker` from the `ruff_linter` crate available,
+/// consider using `Checker::default_fstring_flags` to create instances of this struct; this method
+/// will properly handle nested f-strings. For usage that doesn't fit into one of these categories,
+/// the public constructor [`FStringFlags::empty`] can be used.
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct FStringFlags(FStringFlagsInner);
 
 impl FStringFlags {
+    /// Construct a new [`FStringFlags`] with **no flags set**.
+    ///
+    /// See [`FStringFlags::with_quote_style`], [`FStringFlags::with_triple_quotes`], and
+    /// [`FStringFlags::with_prefix`] for ways of setting the quote style (single or double),
+    /// enabling triple quotes, and adding prefixes (such as `r`), respectively.
+    ///
+    /// See the documentation for [`FStringFlags`] for additional caveats on this constructor, and
+    /// situations in which alternative ways to construct this struct should be used, especially
+    /// when writing lint rules.
+    pub fn empty() -> Self {
+        Self(FStringFlagsInner::empty())
+    }
+
     #[must_use]
     pub fn with_quote_style(mut self, quote_style: Quote) -> Self {
         self.0
@@ -1075,8 +1130,9 @@ impl FStringFlags {
     }
 
     #[must_use]
-    pub fn with_triple_quotes(mut self) -> Self {
-        self.0 |= FStringFlagsInner::TRIPLE_QUOTED;
+    pub fn with_triple_quotes(mut self, triple_quotes: TripleQuotes) -> Self {
+        self.0
+            .set(FStringFlagsInner::TRIPLE_QUOTED, triple_quotes.is_yes());
         self
     }
 
@@ -1110,8 +1166,12 @@ impl StringFlags for FStringFlags {
     /// Return `true` if the f-string is triple-quoted, i.e.,
     /// it begins and ends with three consecutive quote characters.
     /// For example: `f"""{bar}"""`
-    fn is_triple_quoted(self) -> bool {
-        self.0.contains(FStringFlagsInner::TRIPLE_QUOTED)
+    fn triple_quotes(self) -> TripleQuotes {
+        if self.0.contains(FStringFlagsInner::TRIPLE_QUOTED) {
+            TripleQuotes::Yes
+        } else {
+            TripleQuotes::No
+        }
     }
 
     /// Return the quoting style (single or double quotes)
@@ -1455,8 +1515,11 @@ impl StringLiteralFlags {
     }
 
     #[must_use]
-    pub fn with_triple_quotes(mut self) -> Self {
-        self.0 |= StringLiteralFlagsInner::TRIPLE_QUOTED;
+    pub fn with_triple_quotes(mut self, triple_quotes: TripleQuotes) -> Self {
+        self.0.set(
+            StringLiteralFlagsInner::TRIPLE_QUOTED,
+            triple_quotes.is_yes(),
+        );
         self
     }
 
@@ -1528,8 +1591,12 @@ impl StringFlags for StringLiteralFlags {
     /// Return `true` if the string is triple-quoted, i.e.,
     /// it begins and ends with three consecutive quote characters.
     /// For example: `"""bar"""`
-    fn is_triple_quoted(self) -> bool {
-        self.0.contains(StringLiteralFlagsInner::TRIPLE_QUOTED)
+    fn triple_quotes(self) -> TripleQuotes {
+        if self.0.contains(StringLiteralFlagsInner::TRIPLE_QUOTED) {
+            TripleQuotes::Yes
+        } else {
+            TripleQuotes::No
+        }
     }
 
     fn prefix(self) -> AnyStringPrefix {
@@ -1634,14 +1701,14 @@ impl Debug for ConcatenatedStringLiteral {
 
 /// An AST node that represents either a single bytes literal or an implicitly
 /// concatenated bytes literals.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExprBytesLiteral {
     pub range: TextRange,
     pub value: BytesLiteralValue,
 }
 
 /// The value representing a [`ExprBytesLiteral`].
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BytesLiteralValue {
     inner: BytesLiteralValueInner,
 }
@@ -1714,6 +1781,16 @@ impl BytesLiteralValue {
     pub fn bytes(&self) -> impl Iterator<Item = u8> + '_ {
         self.iter().flat_map(|part| part.as_slice().iter().copied())
     }
+
+    /// Returns the [`BytesLiteralFlags`] associated with this literal.
+    ///
+    /// For an implicitly concatenated literal, it returns the flags for the first literal.
+    pub fn flags(&self) -> BytesLiteralFlags {
+        self.iter()
+            .next()
+            .expect("There should always be at least one literal in an `ExprBytesLiteral` node")
+            .flags
+    }
 }
 
 impl<'a> IntoIterator for &'a BytesLiteralValue {
@@ -1771,12 +1848,6 @@ enum BytesLiteralValueInner {
     Concatenated(Vec<BytesLiteral>),
 }
 
-impl Default for BytesLiteralValueInner {
-    fn default() -> Self {
-        Self::Single(BytesLiteral::default())
-    }
-}
-
 bitflags! {
     #[derive(Default, Copy, Clone, PartialEq, Eq, Hash)]
     struct BytesLiteralFlagsInner: u8 {
@@ -1805,10 +1876,33 @@ bitflags! {
 
 /// Flags that can be queried to obtain information
 /// regarding the prefixes and quotes used for a bytes literal.
-#[derive(Default, Copy, Clone, Eq, PartialEq, Hash)]
+///
+/// ## Notes on usage
+///
+/// If you're using a `Generator` from the `ruff_python_codegen` crate to generate a lint-rule fix
+/// from an existing bytes literal, consider passing along the [`BytesLiteral::flags`] field or the
+/// result of the [`BytesLiteralValue::flags`] method. If you don't have an existing literal but
+/// have a `Checker` from the `ruff_linter` crate available, consider using
+/// `Checker::default_bytes_flags` to create instances of this struct; this method will properly
+/// handle surrounding f-strings. For usage that doesn't fit into one of these categories, the
+/// public constructor [`BytesLiteralFlags::empty`] can be used.
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct BytesLiteralFlags(BytesLiteralFlagsInner);
 
 impl BytesLiteralFlags {
+    /// Construct a new [`BytesLiteralFlags`] with **no flags set**.
+    ///
+    /// See [`BytesLiteralFlags::with_quote_style`], [`BytesLiteralFlags::with_triple_quotes`], and
+    /// [`BytesLiteralFlags::with_prefix`] for ways of setting the quote style (single or double),
+    /// enabling triple quotes, and adding prefixes (such as `r`), respectively.
+    ///
+    /// See the documentation for [`BytesLiteralFlags`] for additional caveats on this constructor,
+    /// and situations in which alternative ways to construct this struct should be used, especially
+    /// when writing lint rules.
+    pub fn empty() -> Self {
+        Self(BytesLiteralFlagsInner::empty())
+    }
+
     #[must_use]
     pub fn with_quote_style(mut self, quote_style: Quote) -> Self {
         self.0
@@ -1817,8 +1911,11 @@ impl BytesLiteralFlags {
     }
 
     #[must_use]
-    pub fn with_triple_quotes(mut self) -> Self {
-        self.0 |= BytesLiteralFlagsInner::TRIPLE_QUOTED;
+    pub fn with_triple_quotes(mut self, triple_quotes: TripleQuotes) -> Self {
+        self.0.set(
+            BytesLiteralFlagsInner::TRIPLE_QUOTED,
+            triple_quotes.is_yes(),
+        );
         self
     }
 
@@ -1861,8 +1958,12 @@ impl StringFlags for BytesLiteralFlags {
     /// Return `true` if the bytestring is triple-quoted, i.e.,
     /// it begins and ends with three consecutive quote characters.
     /// For example: `b"""{bar}"""`
-    fn is_triple_quoted(self) -> bool {
-        self.0.contains(BytesLiteralFlagsInner::TRIPLE_QUOTED)
+    fn triple_quotes(self) -> TripleQuotes {
+        if self.0.contains(BytesLiteralFlagsInner::TRIPLE_QUOTED) {
+            TripleQuotes::Yes
+        } else {
+            TripleQuotes::No
+        }
     }
 
     /// Return the quoting style (single or double quotes)
@@ -1894,7 +1995,7 @@ impl fmt::Debug for BytesLiteralFlags {
 
 /// An AST node that represents a single bytes literal which is part of an
 /// [`ExprBytesLiteral`].
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BytesLiteral {
     pub range: TextRange,
     pub value: Box<[u8]>,
@@ -1920,7 +2021,7 @@ impl BytesLiteral {
         Self {
             range,
             value: Box::new([]),
-            flags: BytesLiteralFlags::default().with_invalid(),
+            flags: BytesLiteralFlags::empty().with_invalid(),
         }
     }
 }
@@ -1986,7 +2087,7 @@ bitflags! {
     }
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AnyStringFlags(AnyStringFlagsInner);
 
 impl AnyStringFlags {
@@ -2024,13 +2125,11 @@ impl AnyStringFlags {
         self
     }
 
-    pub fn new(prefix: AnyStringPrefix, quotes: Quote, triple_quoted: bool) -> Self {
-        let new = Self::default().with_prefix(prefix).with_quote_style(quotes);
-        if triple_quoted {
-            new.with_triple_quotes()
-        } else {
-            new
-        }
+    pub fn new(prefix: AnyStringPrefix, quotes: Quote, triple_quotes: TripleQuotes) -> Self {
+        Self(AnyStringFlagsInner::empty())
+            .with_prefix(prefix)
+            .with_quote_style(quotes)
+            .with_triple_quotes(triple_quotes)
     }
 
     /// Does the string have a `u` or `U` prefix?
@@ -2065,8 +2164,9 @@ impl AnyStringFlags {
     }
 
     #[must_use]
-    pub fn with_triple_quotes(mut self) -> Self {
-        self.0 |= AnyStringFlagsInner::TRIPLE_QUOTED;
+    pub fn with_triple_quotes(mut self, triple_quotes: TripleQuotes) -> Self {
+        self.0
+            .set(AnyStringFlagsInner::TRIPLE_QUOTED, triple_quotes.is_yes());
         self
     }
 }
@@ -2081,10 +2181,12 @@ impl StringFlags for AnyStringFlags {
         }
     }
 
-    /// Is the string triple-quoted, i.e.,
-    /// does it begin and end with three consecutive quote characters?
-    fn is_triple_quoted(self) -> bool {
-        self.0.contains(AnyStringFlagsInner::TRIPLE_QUOTED)
+    fn triple_quotes(self) -> TripleQuotes {
+        if self.0.contains(AnyStringFlagsInner::TRIPLE_QUOTED) {
+            TripleQuotes::Yes
+        } else {
+            TripleQuotes::No
+        }
     }
 
     fn prefix(self) -> AnyStringPrefix {
@@ -2144,24 +2246,16 @@ impl From<AnyStringFlags> for StringLiteralFlags {
                 value.prefix()
             )
         };
-        let new = StringLiteralFlags::empty()
+        StringLiteralFlags::empty()
             .with_quote_style(value.quote_style())
-            .with_prefix(prefix);
-        if value.is_triple_quoted() {
-            new.with_triple_quotes()
-        } else {
-            new
-        }
+            .with_prefix(prefix)
+            .with_triple_quotes(value.triple_quotes())
     }
 }
 
 impl From<StringLiteralFlags> for AnyStringFlags {
     fn from(value: StringLiteralFlags) -> Self {
-        Self::new(
-            AnyStringPrefix::Regular(value.prefix()),
-            value.quote_style(),
-            value.is_triple_quoted(),
-        )
+        value.as_any_string_flags()
     }
 }
 
@@ -2173,24 +2267,16 @@ impl From<AnyStringFlags> for BytesLiteralFlags {
                 value.prefix()
             )
         };
-        let new = BytesLiteralFlags::default()
+        BytesLiteralFlags::empty()
             .with_quote_style(value.quote_style())
-            .with_prefix(bytestring_prefix);
-        if value.is_triple_quoted() {
-            new.with_triple_quotes()
-        } else {
-            new
-        }
+            .with_prefix(bytestring_prefix)
+            .with_triple_quotes(value.triple_quotes())
     }
 }
 
 impl From<BytesLiteralFlags> for AnyStringFlags {
     fn from(value: BytesLiteralFlags) -> Self {
-        Self::new(
-            AnyStringPrefix::Bytes(value.prefix()),
-            value.quote_style(),
-            value.is_triple_quoted(),
-        )
+        value.as_any_string_flags()
     }
 }
 
@@ -2202,24 +2288,16 @@ impl From<AnyStringFlags> for FStringFlags {
                 value.prefix()
             )
         };
-        let new = FStringFlags::default()
+        FStringFlags::empty()
             .with_quote_style(value.quote_style())
-            .with_prefix(fstring_prefix);
-        if value.is_triple_quoted() {
-            new.with_triple_quotes()
-        } else {
-            new
-        }
+            .with_prefix(fstring_prefix)
+            .with_triple_quotes(value.triple_quotes())
     }
 }
 
 impl From<FStringFlags> for AnyStringFlags {
     fn from(value: FStringFlags) -> Self {
-        Self::new(
-            AnyStringPrefix::Format(value.prefix()),
-            value.quote_style(),
-            value.is_triple_quoted(),
-        )
+        value.as_any_string_flags()
     }
 }
 
@@ -2603,6 +2681,16 @@ pub struct Parameter {
     pub range: TextRange,
     pub name: Identifier,
     pub annotation: Option<Box<Expr>>,
+}
+
+impl Parameter {
+    pub const fn name(&self) -> &Identifier {
+        &self.name
+    }
+
+    pub fn annotation(&self) -> Option<&Expr> {
+        self.annotation.as_deref()
+    }
 }
 
 /// See also [keyword](https://docs.python.org/3/library/ast.html#ast.keyword)
@@ -3098,6 +3186,20 @@ pub struct ParameterWithDefault {
     pub default: Option<Box<Expr>>,
 }
 
+impl ParameterWithDefault {
+    pub fn default(&self) -> Option<&Expr> {
+        self.default.as_deref()
+    }
+
+    pub const fn name(&self) -> &Identifier {
+        self.parameter.name()
+    }
+
+    pub fn annotation(&self) -> Option<&Expr> {
+        self.parameter.annotation()
+    }
+}
+
 /// An AST node used to represent the arguments passed to a function call or class definition.
 ///
 /// For example, given:
@@ -3455,7 +3557,7 @@ impl From<Identifier> for Name {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq)]
 pub enum Singleton {
     None,
     True,

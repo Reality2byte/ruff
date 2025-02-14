@@ -4,7 +4,7 @@ use crate::{semantic_index::definition::Definition, types::todo_type};
 use ruff_python_ast::{self as ast, name::Name};
 
 /// A typed callable signature.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub(crate) struct Signature<'db> {
     /// Parameters, in source order.
     ///
@@ -60,7 +60,7 @@ impl<'db> Signature<'db> {
 }
 
 // TODO: use SmallVec here once invariance bug is fixed
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub(crate) struct Parameters<'db>(Vec<Parameter<'db>>);
 
 impl<'db> Parameters<'db> {
@@ -93,10 +93,9 @@ impl<'db> Parameters<'db> {
             kwarg,
             range: _,
         } = parameters;
-        let default_ty = |parameter_with_default: &ast::ParameterWithDefault| {
-            parameter_with_default
-                .default
-                .as_deref()
+        let default_ty = |param: &ast::ParameterWithDefault| {
+            param
+                .default()
                 .map(|default| definition_expression_type(db, definition, default))
         };
         let positional_only = posonlyargs.iter().map(|arg| {
@@ -219,7 +218,7 @@ impl<'db> std::ops::Index<usize> for Parameters<'db> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub(crate) struct Parameter<'db> {
     /// Parameter name.
     ///
@@ -243,8 +242,7 @@ impl<'db> Parameter<'db> {
         Self {
             name: Some(parameter.name.id.clone()),
             annotated_ty: parameter
-                .annotation
-                .as_deref()
+                .annotation()
                 .map(|annotation| definition_expression_type(db, definition, annotation)),
             kind,
         }
@@ -306,7 +304,7 @@ impl<'db> Parameter<'db> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, salsa::Update)]
 pub(crate) enum ParameterKind<'db> {
     /// Positional-only parameter, e.g. `def f(x, /): ...`
     PositionalOnly { default_ty: Option<Type<'db>> },
@@ -359,6 +357,8 @@ mod tests {
         db.write_dedented(
             "/src/a.py",
             "
+            from typing import Literal
+
             def f(a, b: int, c = 1, d: int = 2, /,
                   e = 3, f: Literal[4] = 4, *args: object,
                   g = 5, h: Literal[6] = 6, **kwargs: str) -> bytes: ...
@@ -413,7 +413,7 @@ mod tests {
                 },
                 Parameter {
                     name: Some(Name::new_static("args")),
-                    annotated_ty: Some(KnownClass::Object.to_instance(&db)),
+                    annotated_ty: Some(Type::object(&db)),
                     kind: ParameterKind::Variadic,
                 },
                 Parameter {

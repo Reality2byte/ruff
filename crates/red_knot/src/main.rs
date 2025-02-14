@@ -1,4 +1,7 @@
+use std::io::{self, BufWriter, Write};
 use std::process::{ExitCode, Termination};
+
+use anyhow::Result;
 use std::sync::Mutex;
 
 use crate::args::{Args, CheckCommand, Command};
@@ -8,18 +11,18 @@ use clap::Parser;
 use colored::Colorize;
 use crossbeam::channel as crossbeam_channel;
 use red_knot_project::metadata::options::Options;
-use red_knot_project::watch;
 use red_knot_project::watch::ProjectWatcher;
+use red_knot_project::{watch, Db};
 use red_knot_project::{ProjectDatabase, ProjectMetadata};
 use red_knot_server::run_server;
-use ruff_db::diagnostic::Diagnostic;
+use ruff_db::diagnostic::{Diagnostic, DisplayDiagnosticConfig, Severity};
 use ruff_db::system::{OsSystem, System, SystemPath, SystemPathBuf};
 use salsa::plumbing::ZalsaDatabase;
 
 mod args;
 mod logging;
 mod python_version;
-mod verbosity;
+mod version;
 
 #[allow(clippy::print_stdout, clippy::unnecessary_wraps, clippy::print_stderr)]
 pub fn main() -> ExitStatus {
@@ -49,7 +52,15 @@ fn run() -> anyhow::Result<ExitStatus> {
     match args.command {
         Command::Server => run_server().map(|()| ExitStatus::Success),
         Command::Check(check_args) => run_check(check_args),
+        Command::Version => version().map(|()| ExitStatus::Success),
     }
+}
+
+pub(crate) fn version() -> Result<()> {
+    let mut stdout = BufWriter::new(io::stdout().lock());
+    let version_info = crate::version::version();
+    writeln!(stdout, "red knot {}", &version_info)?;
+    Ok(())
 }
 
 fn run_check(args: CheckCommand) -> anyhow::Result<ExitStatus> {
@@ -84,11 +95,14 @@ fn run_check(args: CheckCommand) -> anyhow::Result<ExitStatus> {
 
     let system = OsSystem::new(cwd);
     let watch = args.watch;
-    let cli_options = args.into_options();
-    let mut workspace_metadata = ProjectMetadata::discover(system.current_directory(), &system)?;
-    workspace_metadata.apply_cli_options(cli_options.clone());
+    let exit_zero = args.exit_zero;
 
-    let mut db = ProjectDatabase::new(workspace_metadata, system)?;
+    let cli_options = args.into_options();
+    let mut project_metadata = ProjectMetadata::discover(system.current_directory(), &system)?;
+    project_metadata.apply_cli_options(cli_options.clone());
+    project_metadata.apply_configuration_files(&system)?;
+
+    let mut db = ProjectDatabase::new(project_metadata, system)?;
 
     let (main_loop, main_loop_cancellation_token) = MainLoop::new(cli_options);
 
@@ -112,7 +126,11 @@ fn run_check(args: CheckCommand) -> anyhow::Result<ExitStatus> {
 
     std::mem::forget(db);
 
-    Ok(exit_status)
+    if exit_zero {
+        Ok(ExitStatus::Success)
+    } else {
+        Ok(exit_status)
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -213,11 +231,24 @@ impl MainLoop {
                     result,
                     revision: check_revision,
                 } => {
-                    let has_diagnostics = !result.is_empty();
+                    let display_config = DisplayDiagnosticConfig::default()
+                        .color(colored::control::SHOULD_COLORIZE.should_colorize());
+
+                    let min_error_severity =
+                        if db.project().settings(db).terminal().error_on_warning {
+                            Severity::Warning
+                        } else {
+                            Severity::Error
+                        };
+
+                    let failed = result
+                        .iter()
+                        .any(|diagnostic| diagnostic.severity() >= min_error_severity);
+
                     if check_revision == revision {
                         #[allow(clippy::print_stdout)]
                         for diagnostic in result {
-                            println!("{}", diagnostic.display(db));
+                            println!("{}", diagnostic.display(db, &display_config));
                         }
                     } else {
                         tracing::debug!(
@@ -226,7 +257,7 @@ impl MainLoop {
                     }
 
                     if self.watcher.is_none() {
-                        return if has_diagnostics {
+                        return if failed {
                             ExitStatus::Failure
                         } else {
                             ExitStatus::Success

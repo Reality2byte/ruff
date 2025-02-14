@@ -97,7 +97,7 @@ impl Transformer for Normalizer {
                         bytes.value = ast::BytesLiteralValue::single(ast::BytesLiteral {
                             value: bytes.value.bytes().collect(),
                             range: bytes.range,
-                            flags: BytesLiteralFlags::default(),
+                            flags: BytesLiteralFlags::empty(),
                         });
                     }
                 }
@@ -181,7 +181,7 @@ impl Transformer for Normalizer {
                         fstring.value = ast::FStringValue::single(ast::FString {
                             elements: collector.elements.into(),
                             range: fstring.range,
-                            flags: FStringFlags::default(),
+                            flags: FStringFlags::empty(),
                         });
                     }
                 }

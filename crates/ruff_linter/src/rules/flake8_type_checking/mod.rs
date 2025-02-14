@@ -524,4 +524,56 @@ mod tests {
         );
         assert_messages!(snapshot, diagnostics);
     }
+
+    #[test_case(
+        r"
+        from __future__ import annotations
+
+        TYPE_CHECKING = False
+        if TYPE_CHECKING:
+            from types import TracebackType
+
+        def foo(tb: TracebackType): ...
+    ",
+        "github_issue_15681_regression_test"
+    )]
+    #[test_case(
+        r"
+        from __future__ import annotations
+
+        import pathlib  # TC003
+
+        TYPE_CHECKING = False
+        if TYPE_CHECKING:
+            from types import TracebackType
+
+        def foo(tb: TracebackType) -> pathlib.Path: ...
+    ",
+        "github_issue_15681_fix_test"
+    )]
+    #[test_case(
+        r"
+        from __future__ import annotations
+
+        TYPE_CHECKING = False
+        if TYPE_CHECKING:
+            from typing import Any, Literal, Never, Self
+        else:
+            def __getattr__(name: str):
+                pass
+
+        __all__ = ['TYPE_CHECKING', 'Any', 'Literal', 'Never', 'Self']
+    ",
+        "github_issue_16045"
+    )]
+    fn contents_preview(contents: &str, snapshot: &str) {
+        let diagnostics = test_snippet(
+            contents,
+            &settings::LinterSettings {
+                preview: settings::types::PreviewMode::Enabled,
+                ..settings::LinterSettings::for_rules(Linter::Flake8TypeChecking.rules())
+            },
+        );
+        assert_messages!(snapshot, diagnostics);
+    }
 }

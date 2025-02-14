@@ -55,7 +55,7 @@ impl AlwaysFixableViolation for AssertWithPrintMessage {
 ///
 /// Checks if the `msg` argument to an `assert` statement is a `print` call, and if so,
 /// replace the message with the arguments to the `print` call.
-pub(crate) fn assert_with_print_message(checker: &mut Checker, stmt: &ast::StmtAssert) {
+pub(crate) fn assert_with_print_message(checker: &Checker, stmt: &ast::StmtAssert) {
     if let Some(Expr::Call(call)) = stmt.msg.as_deref() {
         // We have to check that the print call is a call to the built-in `print` function
         let semantic = checker.semantic();
@@ -66,8 +66,7 @@ pub(crate) fn assert_with_print_message(checker: &mut Checker, stmt: &ast::StmtA
             diagnostic.set_fix(Fix::unsafe_edit(Edit::range_replacement(
                 checker.generator().stmt(&Stmt::Assert(ast::StmtAssert {
                     test: stmt.test.clone(),
-                    msg: print_arguments::to_expr(&call.arguments, checker.default_string_flags())
-                        .map(Box::new),
+                    msg: print_arguments::to_expr(&call.arguments, checker).map(Box::new),
                     range: TextRange::default(),
                 })),
                 // We have to replace the entire statement,
@@ -75,7 +74,7 @@ pub(crate) fn assert_with_print_message(checker: &mut Checker, stmt: &ast::StmtA
                 // will cease to exist.
                 stmt.range(),
             )));
-            checker.diagnostics.push(diagnostic);
+            checker.report_diagnostic(diagnostic);
         }
     }
 }
@@ -95,6 +94,8 @@ mod print_arguments {
         StringLiteralFlags,
     };
     use ruff_text_size::TextRange;
+
+    use crate::checkers::ast::Checker;
 
     /// Converts an expression to a list of `FStringElement`s.
     ///
@@ -222,6 +223,7 @@ mod print_arguments {
     fn args_to_fstring_expr(
         mut args: impl ExactSizeIterator<Item = Vec<FStringElement>>,
         sep: impl ExactSizeIterator<Item = FStringElement>,
+        flags: FStringFlags,
     ) -> Option<Expr> {
         // If there are no arguments, short-circuit and return `None`
         let first_arg = args.next()?;
@@ -236,7 +238,7 @@ mod print_arguments {
         Some(Expr::FString(ExprFString {
             value: FStringValue::single(FString {
                 elements: FStringElements::from(fstring_elements),
-                flags: FStringFlags::default(),
+                flags,
                 range: TextRange::default(),
             }),
             range: TextRange::default(),
@@ -256,7 +258,7 @@ mod print_arguments {
     /// - [`Some`]<[`Expr::StringLiteral`]> if all arguments including `sep` are string literals.
     /// - [`Some`]<[`Expr::FString`]> if any of the arguments are not string literals.
     /// - [`None`] if the `print` contains no positional arguments at all.
-    pub(super) fn to_expr(arguments: &Arguments, flags: StringLiteralFlags) -> Option<Expr> {
+    pub(super) fn to_expr(arguments: &Arguments, checker: &Checker) -> Option<Expr> {
         // Convert the `sep` argument into `FStringElement`s
         let sep = arguments
             .find_keyword("sep")
@@ -286,7 +288,13 @@ mod print_arguments {
 
         // Attempt to convert the `sep` and `args` arguments to a string literal,
         // falling back to an f-string if the arguments are not all string literals.
-        args_to_string_literal_expr(args.iter(), sep.iter(), flags)
-            .or_else(|| args_to_fstring_expr(args.into_iter(), sep.into_iter()))
+        args_to_string_literal_expr(args.iter(), sep.iter(), checker.default_string_flags())
+            .or_else(|| {
+                args_to_fstring_expr(
+                    args.into_iter(),
+                    sep.into_iter(),
+                    checker.default_fstring_flags(),
+                )
+            })
     }
 }

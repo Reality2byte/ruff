@@ -14,15 +14,15 @@ use crate::settings::types::PythonVersion;
 /// Identifies FastAPI routes with deprecated uses of `Depends` or similar.
 ///
 /// ## Why is this bad?
-/// The [FastAPI documentation] recommends the use of [`typing.Annotated`] for
-/// defining route dependencies and parameters, rather than using `Depends`,
+/// The [FastAPI documentation] recommends the use of [`typing.Annotated`][typing-annotated]
+/// for defining route dependencies and parameters, rather than using `Depends`,
 /// `Query` or similar as a default value for a parameter. Using this approach
 /// everywhere helps ensure consistency and clarity in defining dependencies
 /// and parameters.
 ///
 /// `Annotated` was added to the `typing` module in Python 3.9; however,
-/// the third-party [`typing_extensions`] package provides a backport that can be
-/// used on older versions of Python.
+/// the third-party [`typing_extensions`][typing-extensions] package
+/// provides a backport that can be used on older versions of Python.
 ///
 /// ## Example
 ///
@@ -60,9 +60,9 @@ use crate::settings::types::PythonVersion;
 ///     return commons
 /// ```
 ///
-/// [fastAPI documentation]: https://fastapi.tiangolo.com/tutorial/query-params-str-validations/?h=annotated#advantages-of-annotated
-/// [typing.Annotated]: https://docs.python.org/3/library/typing.html#typing.Annotated
-/// [typing_extensions]: https://typing-extensions.readthedocs.io/en/stable/
+/// [FastAPI documentation]: https://fastapi.tiangolo.com/tutorial/query-params-str-validations/?h=annotated#advantages-of-annotated
+/// [typing-annotated]: https://docs.python.org/3/library/typing.html#typing.Annotated
+/// [typing-extensions]: https://typing-extensions.readthedocs.io/en/stable/
 #[derive(ViolationMetadata)]
 pub(crate) struct FastApiNonAnnotatedDependency {
     py_version: PythonVersion,
@@ -88,7 +88,7 @@ impl Violation for FastApiNonAnnotatedDependency {
 
 /// FAST002
 pub(crate) fn fastapi_non_annotated_dependency(
-    checker: &mut Checker,
+    checker: &Checker,
     function_def: &ast::StmtFunctionDef,
 ) {
     if !checker.semantic().seen_module(Modules::FASTAPI)
@@ -107,8 +107,7 @@ pub(crate) fn fastapi_non_annotated_dependency(
         .iter()
         .chain(&function_def.parameters.kwonlyargs)
     {
-        let (Some(annotation), Some(default)) =
-            (&parameter.parameter.annotation, &parameter.default)
+        let (Some(annotation), Some(default)) = (parameter.annotation(), parameter.default())
         else {
             seen_default |= parameter.default.is_some();
             continue;
@@ -120,7 +119,7 @@ pub(crate) fn fastapi_non_annotated_dependency(
                 annotation,
                 default,
                 kind: dependency,
-                name: &parameter.parameter.name,
+                name: parameter.name(),
                 range: parameter.range,
             };
             seen_default = create_diagnostic(
@@ -220,7 +219,7 @@ impl<'a> DependencyCall<'a> {
 /// necessary to determine this while generating the fix, thus the need to return an updated
 /// `seen_default` here.
 fn create_diagnostic(
-    checker: &mut Checker,
+    checker: &Checker,
     parameter: &DependencyParameter,
     dependency_call: Option<DependencyCall>,
     mut seen_default: bool,
@@ -305,7 +304,7 @@ fn create_diagnostic(
     }
     diagnostic.try_set_optional_fix(|| fix);
 
-    checker.diagnostics.push(diagnostic);
+    checker.report_diagnostic(diagnostic);
 
     seen_default
 }
