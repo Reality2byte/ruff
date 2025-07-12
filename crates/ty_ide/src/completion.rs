@@ -536,6 +536,9 @@ _private_type_var_tuple = TypeVarTuple("_private_type_var_tuple")
 public_explicit_type_alias: TypeAlias = Literal[1]
 _private_explicit_type_alias: TypeAlias = Literal[1]
 
+public_implicit_union_alias = int | str
+_private_implicit_union_alias = int | str
+
 class PublicProtocol(Protocol):
     def method(self) -> None: ...
 
@@ -557,7 +560,9 @@ class _PrivateProtocol(Protocol):
         test.assert_completions_include("public_type_var_tuple");
         test.assert_completions_do_not_include("_private_type_var_tuple");
         test.assert_completions_include("public_explicit_type_alias");
-        test.assert_completions_include("_private_explicit_type_alias");
+        test.assert_completions_do_not_include("_private_explicit_type_alias");
+        test.assert_completions_include("public_implicit_union_alias");
+        test.assert_completions_do_not_include("_private_implicit_union_alias");
         test.assert_completions_include("PublicProtocol");
         test.assert_completions_do_not_include("_PrivateProtocol");
     }
@@ -2389,6 +2394,48 @@ Cougar = 3
             .source("package/sub1/sub2/bar.py", "from .foo import <CURSOR>")
             .build();
         test.assert_completions_include("Cheetah");
+    }
+
+    #[test]
+    fn from_import_with_submodule1() {
+        let test = CursorTest::builder()
+            .source("main.py", "from package import <CURSOR>")
+            .source("package/__init__.py", "")
+            .source("package/foo.py", "")
+            .source("package/bar.pyi", "")
+            .source("package/foo-bar.py", "")
+            .source("package/data.txt", "")
+            .source("package/sub/__init__.py", "")
+            .source("package/not-a-submodule/__init__.py", "")
+            .build();
+
+        test.assert_completions_include("foo");
+        test.assert_completions_include("bar");
+        test.assert_completions_include("sub");
+        test.assert_completions_do_not_include("foo-bar");
+        test.assert_completions_do_not_include("data");
+        test.assert_completions_do_not_include("not-a-submodule");
+    }
+
+    #[test]
+    fn from_import_with_vendored_submodule1() {
+        let test = cursor_test(
+            "\
+from http import <CURSOR>
+",
+        );
+        test.assert_completions_include("client");
+    }
+
+    #[test]
+    fn from_import_with_vendored_submodule2() {
+        let test = cursor_test(
+            "\
+from email import <CURSOR>
+",
+        );
+        test.assert_completions_include("mime");
+        test.assert_completions_do_not_include("base");
     }
 
     #[test]

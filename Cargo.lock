@@ -2711,7 +2711,7 @@ dependencies = [
 
 [[package]]
 name = "ruff"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "argfile",
@@ -2852,6 +2852,7 @@ dependencies = [
  "salsa",
  "schemars",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.12",
  "tracing",
@@ -2961,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_linter"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3294,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "ruff_wasm"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -4272,6 +4273,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shellexpand",
+ "thiserror 2.0.12",
  "tracing",
  "tracing-subscriber",
  "ty_ide",
